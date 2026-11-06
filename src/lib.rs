@@ -155,7 +155,7 @@
 //!
 //! The library uses a three-step approach to avoid self-referential lifetime issues:
 //!
-//! 1. **Parse**: Extract named placeholders (`:name`) and convert SQL to use positional placeholders (`?`)
+//! 1. **Parse**: Extract named placeholders (`:name`) and convert them to the backend's positional placeholders
 //! 2. **Store**: Keep the converted SQL, placeholder order, and binder function separately
 //! 3. **Execute**: Construct a fresh SQLx `Query` on each execution with the correct lifetime
 //!
@@ -164,7 +164,7 @@
 //!
 //! ## Limitations
 //!
-//! - The builder emits `?` placeholders; PostgreSQL numbered placeholders are not implemented
+//! - SQLx `Any` requires an explicit [`Platform`] via `new_with_platform`
 //! - Placeholder names must match `[a-zA-Z0-9_]+`
 //! - All placeholders in the SQL must be handled by the binder function
 //!
@@ -180,6 +180,42 @@ pub mod query_as;
 pub use error::{Error, Result};
 pub use query::PreparedQuery;
 pub use query_as::PreparedQueryAs;
+
+/// The SQLx backend's positional placeholder format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    /// MySQL uses `?` placeholders.
+    MySql,
+    /// PostgreSQL uses numbered `$1`, `$2`, ... placeholders.
+    Postgres,
+    /// SQLite uses `?` placeholders.
+    Sqlite,
+    /// `sqlx-mssql-rs` accepts `?` and rewrites it to SQL Server's `@P1`, `@P2`, ...
+    Mssql,
+}
+
+impl Platform {
+    /// Returns the placeholder for a zero-based binding position.
+    pub fn placeholder(self, index: usize) -> String {
+        match self {
+            Self::Postgres => format!("${}", index + 1),
+            Self::MySql | Self::Sqlite | Self::Mssql => "?".to_owned(),
+        }
+    }
+
+    /// Determines the platform from SQLx's database type.
+    ///
+    /// SQLx `Any` and unknown drivers require an explicit platform instead.
+    pub fn for_database<DB: sqlx::Database>() -> Result<Self> {
+        match DB::NAME {
+            "MySQL" => Ok(Self::MySql),
+            "PostgreSQL" => Ok(Self::Postgres),
+            "SQLite" => Ok(Self::Sqlite),
+            "MSSQL" => Ok(Self::Mssql),
+            name => Err(Error::PlatformRequired(name)),
+        }
+    }
+}
 
 /// A prepared query using SQLite arguments.
 #[cfg(feature = "sqlite")]
@@ -236,6 +272,7 @@ pub type MssqlPreparedQueryAs<'q, R, F> = PreparedQueryAs<
 /// Convenience re-exports for common use cases
 pub mod prelude {
     pub use crate::error::{Error, Result};
+    pub use crate::Platform;
     pub use crate::PreparedQuery;
     pub use crate::PreparedQueryAs;
 

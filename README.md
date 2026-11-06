@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/sqlx-named-bind.svg)](https://crates.io/crates/sqlx-named-bind)
 [![Documentation](https://docs.rs/sqlx-named-bind/badge.svg)](https://docs.rs/sqlx-named-bind)
-[![License](https://img.shields.io/crates/l/sqlx-named-bind.svg)](https://github.com/AkiraKaneshiro/sqlx-named-bind#license)
+[![License](https://img.shields.io/crates/l/sqlx-named-bind.svg)](https://github.com/ahsanu123/sqlx-named-bind#license)
 
 A SQLx extension that provides named parameter binding with HRTB (Higher-Rank Trait Bounds) pattern, avoiding self-referential lifetime issues.
 
@@ -27,7 +27,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
 SQLite is enabled by default. Each platform feature exposes database-specific type
-aliases in the crate root and `prelude`, without changing the generic implementation.
+aliases in the crate root and `prelude`. Typed backends automatically select the
+appropriate placeholder format using the `Platform` enum.
 
 | Feature | Query alias | Typed query alias |
 |---------|-------------|-------------------|
@@ -53,6 +54,42 @@ Enable `mssql` to use the optional
 sqlx-named-bind = { version = "0.1", default-features = false, features = ["mssql"] }
 sqlx-mssql-rs = { version = "0.1.1", default-features = false }
 ```
+
+## Platform Placeholders
+
+| Platform | Bound placeholders |
+|----------|--------------------|
+| `Platform::Sqlite` | `?`, `?`, ... |
+| `Platform::MySql` | `?`, `?`, ... |
+| `Platform::Postgres` | `$1`, `$2`, ... |
+| `Platform::Mssql` | `?`, `?`, ... (rewritten to `@P1`, `@P2`, ... by `sqlx-mssql-rs`) |
+
+`new(template, binder)` selects the platform from the SQLx database type, not
+from which Cargo features happen to be enabled. Repeated names are bound once
+per occurrence, so PostgreSQL's `:id + :id` becomes `$1 + $2`.
+PostgreSQL casts such as `:id::int` are preserved as `$1::int`.
+
+SQLx `Any` does not identify a concrete backend at construction time. Use
+`new_with_platform(template, binder, platform)` with the platform of the target
+connection or pool; `new` returns `Error::PlatformRequired` for `Any`:
+
+```rust
+use sqlx_named_bind::{AnyPreparedQueryAs, Platform};
+
+let query = AnyPreparedQueryAs::<(i32,), _>::new_with_platform(
+    "SELECT :id + :id",
+    |q, key| match key {
+        ":id" => q.bind(42),
+        _ => q,
+    },
+    Platform::Postgres,
+)?;
+```
+
+Enable the `any` feature and the concrete SQLx backend, and register drivers with
+`sqlx::any::install_default_drivers()` for built-in drivers before connecting.
+The low-level `builder::build_query` keeps its existing `?` output;
+`builder::build_query_for_platform(template, platform)` selects a format explicitly.
 
 ## Quick Start
 
@@ -191,7 +228,7 @@ async fn find_user_by_email(
 
 The library uses a three-step approach to avoid self-referential lifetime issues:
 
-1. **Parse**: Extract named placeholders (`:name`) and convert SQL to use positional placeholders (`?`)
+1. **Parse**: Extract named placeholders (`:name`) and convert them to the backend's positional placeholders
 2. **Store**: Keep the converted SQL, placeholder order, and binder function separately
 3. **Execute**: Construct a fresh SQLx `Query` on each execution with the correct lifetime
 
@@ -252,6 +289,7 @@ For queries that execute but don't return rows (`INSERT`, `UPDATE`, `DELETE`).
 
 **Methods:**
 - `new(template, binder)` - Create a new prepared query
+- `new_with_platform(template, binder, platform)` - Explicitly select a placeholder format (required for `Any`)
 - `execute(executor)` - Execute the query and return `SqliteQueryResult`
 
 ### `SqlitePreparedQueryAs<'q, R, F>`
@@ -260,13 +298,14 @@ For queries that return typed rows (`SELECT`).
 
 **Methods:**
 - `new(template, binder)` - Create a new prepared query
+- `new_with_platform(template, binder, platform)` - Explicitly select a placeholder format (required for `Any`)
 - `fetch_all(executor)` - Fetch all matching rows
 - `fetch_one(executor)` - Fetch the first row (error if no rows match)
 - `fetch_optional(executor)` - Fetch the first row if present (returns `Option<R>`)
 
 ## Limitations
 
-- The builder emits `?` placeholders; PostgreSQL numbered placeholders are not implemented
+- SQLx `Any` requires an explicit platform matching its target connection or pool
 - Placeholder names must match `[a-zA-Z0-9_]+`
 - All placeholders in the SQL must be handled by the binder function
 

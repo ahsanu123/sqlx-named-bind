@@ -1,5 +1,4 @@
-use crate::builder::build_query;
-use regex::Regex;
+use crate::{builder::parse_query, Platform};
 use sqlx::query::Query;
 use sqlx::Executor;
 use sqlx::{AssertSqlSafe, Database, IntoArguments};
@@ -11,7 +10,7 @@ pub type Q<'q, DB, ARGS> = Query<'q, DB, ARGS>;
 /// A prepared query builder that supports named placeholders.
 ///
 /// `PreparedQuery` allows you to use named placeholders (`:name`) in your SQL templates
-/// instead of positional placeholders (`?`). It avoids self-referential lifetime issues
+/// instead of backend-specific positional placeholders. It avoids self-referential lifetime issues
 /// by storing the SQL template, placeholder order, and binder function separately,
 /// and constructing the actual `Query` on each execution.
 ///
@@ -97,6 +96,7 @@ where
     /// # Errors
     ///
     /// Returns an error if the SQL template cannot be parsed (invalid regex pattern).
+    /// SQLx `Any` and unknown drivers require [`Self::new_with_platform`] instead.
     ///
     /// # Examples
     ///
@@ -116,12 +116,18 @@ where
     where
         T: Into<String>,
     {
-        let template = template.into();
-        let order = Regex::new(r":[a-zA-Z0-9_]+")?
-            .find_iter(&template)
-            .map(|m| m.as_str().to_owned())
-            .collect();
-        let sql = build_query(&template)?;
+        Self::new_with_platform(template, binder, Platform::for_database::<DB>()?)
+    }
+
+    /// Creates a query using an explicit placeholder format.
+    ///
+    /// Use this with SQLx `Any`, choosing the platform of the connection or pool
+    /// on which the query will execute.
+    pub fn new_with_platform<T>(template: T, binder: F, platform: Platform) -> crate::Result<Self>
+    where
+        T: Into<String>,
+    {
+        let (sql, order) = parse_query(&template.into(), platform)?;
         Ok(Self {
             sql,
             order,
@@ -184,6 +190,69 @@ where
             q = binder(q, key);
         }
         Ok(q.execute(executor).await?)
+    }
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "sqlite",
+        feature = "mysql",
+        feature = "postgres",
+        feature = "mssql"
+    )
+))]
+mod platform_tests {
+    use super::*;
+
+    fn check_platform<DB: Database>(expected: &str)
+    where
+        DB::Arguments: IntoArguments<DB>,
+    {
+        let query = PreparedQuery::<_, DB, _>::new(
+            "INSERT INTO users (id, name, alias) VALUES (:id, :name, :name)",
+            |q, _| q,
+        )
+        .unwrap();
+        assert_eq!(query.sql, expected);
+        assert_eq!(query.order, vec![":id", ":name", ":name"]);
+    }
+
+    #[test]
+    fn test_automatic_platform_placeholders() {
+        #[cfg(feature = "sqlite")]
+        check_platform::<sqlx::Sqlite>("INSERT INTO users (id, name, alias) VALUES (?, ?, ?)");
+        #[cfg(feature = "mysql")]
+        check_platform::<sqlx::MySql>("INSERT INTO users (id, name, alias) VALUES (?, ?, ?)");
+        #[cfg(feature = "postgres")]
+        check_platform::<sqlx::Postgres>("INSERT INTO users (id, name, alias) VALUES ($1, $2, $3)");
+        #[cfg(feature = "mssql")]
+        check_platform::<sqlx_mssql_rs::Mssql>(
+            "INSERT INTO users (id, name, alias) VALUES (?, ?, ?)",
+        );
+    }
+}
+
+#[cfg(all(test, feature = "any"))]
+mod any_tests {
+    use crate::{AnyPreparedQuery, Error, Platform};
+
+    #[test]
+    fn test_any_requires_explicit_platform() {
+        let query = AnyPreparedQuery::new("SELECT :id", |q, _| q);
+        assert!(matches!(query, Err(Error::PlatformRequired("Any"))));
+
+        let query = AnyPreparedQuery::new_with_platform(
+            "SELECT :id, :id",
+            |q, key| match key {
+                ":id" => q.bind(42),
+                _ => panic!("unexpected placeholder: {key}"),
+            },
+            Platform::Postgres,
+        )
+        .unwrap();
+        assert_eq!(query.sql, "SELECT $1, $2");
+        assert_eq!(query.order, vec![":id", ":id"]);
     }
 }
 

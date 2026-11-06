@@ -1,7 +1,6 @@
 use std::marker::PhantomData;
 
-use crate::builder::build_query;
-use regex::Regex;
+use crate::{builder::parse_query, Platform};
 use sqlx::{query::QueryAs, AssertSqlSafe, Database, Executor, IntoArguments};
 
 /// Type alias for SQLx QueryAs with generic database arguments.
@@ -91,6 +90,7 @@ where
     /// # Errors
     ///
     /// Returns an error if the SQL template cannot be parsed.
+    /// SQLx `Any` and unknown drivers require [`Self::new_with_platform`] instead.
     ///
     /// # Examples
     ///
@@ -117,12 +117,18 @@ where
     where
         T: Into<String>,
     {
-        let template = template.into();
-        let order = Regex::new(r":[a-zA-Z0-9_]+")?
-            .find_iter(&template)
-            .map(|m| m.as_str().to_owned())
-            .collect();
-        let sql = build_query(&template)?;
+        Self::new_with_platform(template, binder, Platform::for_database::<DB>()?)
+    }
+
+    /// Creates a typed query using an explicit placeholder format.
+    ///
+    /// Use this with SQLx `Any`, choosing the platform of the connection or pool
+    /// on which the query will execute.
+    pub fn new_with_platform<T>(template: T, binder: F, platform: Platform) -> crate::Result<Self>
+    where
+        T: Into<String>,
+    {
+        let (sql, order) = parse_query(&template.into(), platform)?;
 
         Ok(Self {
             sql,
@@ -321,6 +327,116 @@ where
             q = binder(q, key);
         }
         Ok(q.fetch_optional(executor).await?)
+    }
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "sqlite",
+        feature = "mysql",
+        feature = "postgres",
+        feature = "mssql"
+    )
+))]
+mod platform_tests {
+    use super::*;
+
+    fn check_platform<DB: Database>(expected: &str)
+    where
+        DB::Arguments: IntoArguments<DB>,
+        (i32,): for<'r> sqlx::FromRow<'r, DB::Row>,
+    {
+        let query =
+            PreparedQueryAs::<(i32,), _, DB, _, _>::new("SELECT :id + :other + :id", |q, _| q)
+                .unwrap();
+        assert_eq!(query.sql, expected);
+        assert_eq!(query.order, vec![":id", ":other", ":id"]);
+    }
+
+    #[test]
+    fn test_automatic_platform_placeholders() {
+        #[cfg(feature = "sqlite")]
+        check_platform::<sqlx::Sqlite>("SELECT ? + ? + ?");
+        #[cfg(feature = "mysql")]
+        check_platform::<sqlx::MySql>("SELECT ? + ? + ?");
+        #[cfg(feature = "postgres")]
+        check_platform::<sqlx::Postgres>("SELECT $1 + $2 + $3");
+        #[cfg(feature = "mssql")]
+        check_platform::<sqlx_mssql_rs::Mssql>("SELECT ? + ? + ?");
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn test_postgres_casts_preserve_binding_order() {
+        let query =
+            crate::PgPreparedQueryAs::<(i32,), _>::new("SELECT :id::int + :id::int", |q, key| {
+                match key {
+                    ":id" => q.bind(42),
+                    _ => panic!("unexpected placeholder: {key}"),
+                }
+            })
+            .unwrap();
+        assert_eq!(query.sql, "SELECT $1::int + $2::int");
+        assert_eq!(query.order, vec![":id", ":id"]);
+    }
+}
+
+#[cfg(all(test, feature = "any"))]
+mod any_tests {
+    use crate::{AnyPreparedQueryAs, Error, Platform};
+
+    #[test]
+    fn test_any_requires_explicit_platform() {
+        let query = AnyPreparedQueryAs::<(i32,), _>::new("SELECT :id", |q, _| q);
+        assert!(matches!(query, Err(Error::PlatformRequired("Any"))));
+
+        let query = AnyPreparedQueryAs::<(i32,), _>::new_with_platform(
+            "SELECT :id + :id",
+            |q, key| match key {
+                ":id" => q.bind(42),
+                _ => panic!("unexpected placeholder: {key}"),
+            },
+            Platform::Postgres,
+        )
+        .unwrap();
+        assert_eq!(query.sql, "SELECT $1 + $2");
+        assert_eq!(query.order, vec![":id", ":id"]);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_any_executes_with_explicit_platform() -> crate::Result<()> {
+        use sqlx::{AssertSqlSafe, Connection};
+
+        sqlx::any::install_default_drivers();
+        let mut connection = sqlx::AnyConnection::connect("sqlite::memory:").await?;
+        sqlx::query(AssertSqlSafe("CREATE TABLE numbers (value INTEGER)"))
+            .execute(&mut connection)
+            .await?;
+
+        let mut insert = crate::AnyPreparedQuery::new_with_platform(
+            "INSERT INTO numbers (value) VALUES (:value)",
+            |q, key| match key {
+                ":value" => q.bind(42),
+                _ => panic!("unexpected placeholder: {key}"),
+            },
+            Platform::Sqlite,
+        )?;
+        assert_eq!(insert.execute(&mut connection).await?.rows_affected(), 1);
+
+        let mut select = AnyPreparedQueryAs::<(i32,), _>::new_with_platform(
+            "SELECT value FROM numbers WHERE value = :value OR value = :value",
+            |q, key| match key {
+                ":value" => q.bind(42),
+                _ => panic!("unexpected placeholder: {key}"),
+            },
+            Platform::Sqlite,
+        )?;
+        assert_eq!(select.fetch_one(&mut connection).await?, (42,));
+        assert_eq!(select.fetch_all(&mut connection).await?, vec![(42,)]);
+        assert_eq!(select.fetch_optional(&mut connection).await?, Some((42,)));
+        Ok(())
     }
 }
 

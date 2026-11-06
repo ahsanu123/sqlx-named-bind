@@ -9,6 +9,10 @@ pub enum Error {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
+    /// The database type does not identify a concrete placeholder format.
+    #[error("Database '{0}' requires an explicit platform; use new_with_platform")]
+    PlatformRequired(&'static str),
+
     /// Placeholder was referenced but not bound by the binder function
     #[error("Placeholder '{0}' was not bound by the binder function")]
     UnboundPlaceholder(String),
