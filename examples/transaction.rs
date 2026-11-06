@@ -2,11 +2,12 @@
 //!
 //! Run with: cargo run --example transaction
 //!
-//! Make sure you have a MySQL database running and set DATABASE_URL environment variable:
-//! export DATABASE_URL="mysql://user:password@localhost/test_db"
+//! Uses an in-memory SQLite database; no database server or configuration is needed.
 
-use sqlx::{MySqlPool, Transaction, MySql, FromRow};
-use sqlx_named_bind::{PreparedQuery, PreparedQueryAs};
+use sqlx::{sqlite::SqlitePoolOptions, AssertSqlSafe, FromRow, Sqlite, SqlitePool, Transaction};
+use sqlx_named_bind::{
+    SqlitePreparedQuery as PreparedQuery, SqlitePreparedQueryAs as PreparedQueryAs,
+};
 
 #[derive(Debug, FromRow)]
 struct Account {
@@ -16,12 +17,15 @@ struct Account {
 }
 
 async fn transfer_money(
-    tx: &mut Transaction<'_, MySql>,
+    tx: &mut Transaction<'_, Sqlite>,
     from_id: i32,
     to_id: i32,
     amount: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("  Transferring ${} from account {} to account {}", amount, from_id, to_id);
+    println!(
+        "  Transferring ${} from account {} to account {}",
+        amount, from_id, to_id
+    );
 
     // Debit from source account
     let mut debit = PreparedQuery::new(
@@ -30,7 +34,7 @@ async fn transfer_money(
             ":amount" => q.bind(amount),
             ":id" => q.bind(from_id),
             _ => q,
-        }
+        },
     )?;
 
     let result = debit.execute(&mut **tx).await?;
@@ -44,7 +48,7 @@ async fn transfer_money(
         |q, key| match key {
             ":id" => q.bind(from_id),
             _ => q,
-        }
+        },
     )?;
 
     let (balance,) = check_balance.fetch_one(&mut **tx).await?;
@@ -59,7 +63,7 @@ async fn transfer_money(
             ":amount" => q.bind(amount),
             ":id" => q.bind(to_id),
             _ => q,
-        }
+        },
     )?;
 
     let result = credit.execute(&mut **tx).await?;
@@ -71,7 +75,7 @@ async fn transfer_money(
     Ok(())
 }
 
-async fn show_accounts(pool: &MySqlPool) -> Result<(), Box<dyn std::error::Error>> {
+async fn show_accounts(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error>> {
     let mut query = PreparedQueryAs::<Account, _>::new(
         "SELECT id, name, balance FROM accounts ORDER BY id",
         |q, _key| q,
@@ -80,41 +84,40 @@ async fn show_accounts(pool: &MySqlPool) -> Result<(), Box<dyn std::error::Error
     let accounts = query.fetch_all(pool).await?;
     println!("\nCurrent account balances:");
     for account in &accounts {
-        println!("  {} (id={}): ${}", account.name, account.id, account.balance);
+        println!(
+            "  {} (id={}): ${}",
+            account.name, account.id, account.balance
+        );
     }
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenvy::dotenv().ok();
-
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "mysql://root:root@localhost/test_db".to_string());
-
     println!("Connecting to database...");
-    let pool = MySqlPool::connect(&database_url).await?;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
 
     // Setup: Create accounts table
     println!("\nSetting up accounts table...");
-    sqlx::query("DROP TABLE IF EXISTS accounts").execute(&pool).await?;
-    sqlx::query(
+    sqlx::query(AssertSqlSafe("DROP TABLE IF EXISTS accounts"))
+        .execute(&pool)
+        .await?;
+    sqlx::query(AssertSqlSafe(
         "CREATE TABLE accounts (
-            id INT PRIMARY KEY AUTO_INCREMENT,
+            id INTEGER PRIMARY KEY,
             name VARCHAR(100) NOT NULL,
             balance INT NOT NULL DEFAULT 0
-        )"
-    )
+        )",
+    ))
     .execute(&pool)
     .await?;
 
     // Insert initial accounts
     println!("\nCreating test accounts...");
-    let accounts = vec![
-        ("Alice", 1000),
-        ("Bob", 500),
-        ("Charlie", 750),
-    ];
+    let accounts = vec![("Alice", 1000), ("Bob", 500), ("Charlie", 750)];
 
     for (name, balance) in accounts {
         let mut query = PreparedQuery::new(
@@ -123,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ":name" => q.bind(name),
                 ":balance" => q.bind(balance),
                 _ => q,
-            }
+            },
         )?;
         query.execute(&pool).await?;
     }
@@ -165,8 +168,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tx = pool.begin().await?;
 
     let transfers = vec![
-        (1, 3, 100),  // Alice -> Charlie
-        (3, 2, 50),   // Charlie -> Bob
+        (1, 3, 100), // Alice -> Charlie
+        (3, 2, 50),  // Charlie -> Bob
     ];
 
     let mut success = true;
@@ -189,7 +192,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Cleanup
     println!("\nCleaning up...");
-    sqlx::query("DROP TABLE IF EXISTS accounts").execute(&pool).await?;
+    sqlx::query(AssertSqlSafe("DROP TABLE IF EXISTS accounts"))
+        .execute(&pool)
+        .await?;
 
     println!("\nExample completed successfully!");
     Ok(())

@@ -2,11 +2,12 @@
 //!
 //! Run with: cargo run --example basic
 //!
-//! Make sure you have a MySQL database running and set DATABASE_URL environment variable:
-//! export DATABASE_URL="mysql://user:password@localhost/test_db"
+//! Uses an in-memory SQLite database; no database server or configuration is needed.
 
-use sqlx::{MySqlPool, FromRow};
-use sqlx_named_bind::{PreparedQuery, PreparedQueryAs};
+use sqlx::{sqlite::SqlitePoolOptions, AssertSqlSafe, FromRow};
+use sqlx_named_bind::{
+    SqlitePreparedQuery as PreparedQuery, SqlitePreparedQueryAs as PreparedQueryAs,
+};
 
 #[derive(Debug, FromRow)]
 struct User {
@@ -17,25 +18,21 @@ struct User {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load .env file if present
-    dotenvy::dotenv().ok();
-
-    // Get database URL from environment
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "mysql://root:root@localhost/test_db".to_string());
-
     println!("Connecting to database...");
-    let pool = MySqlPool::connect(&database_url).await?;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
 
     // Create table if it doesn't exist
     println!("\nCreating users table...");
-    sqlx::query(
+    sqlx::query(AssertSqlSafe(
         "CREATE TABLE IF NOT EXISTS users (
-            id INT PRIMARY KEY AUTO_INCREMENT,
+            id INTEGER PRIMARY KEY,
             name VARCHAR(100) NOT NULL,
             email VARCHAR(100) NOT NULL UNIQUE
-        )"
-    )
+        )",
+    ))
     .execute(&pool)
     .await?;
 
@@ -50,23 +47,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, email) in users_to_insert {
         let mut query = PreparedQuery::new(
             "INSERT INTO users (name, email) VALUES (:name, :email)
-             ON DUPLICATE KEY UPDATE name = VALUES(name)",
+             ON CONFLICT(email) DO UPDATE SET name = excluded.name",
             |q, key| match key {
                 ":name" => q.bind(name),
                 ":email" => q.bind(email),
                 _ => q,
-            }
+            },
         )?;
 
         let result = query.execute(&pool).await?;
-        println!("Inserted user '{}': last_insert_id={}", name, result.last_insert_id());
+        println!(
+            "Inserted user '{}': last_insert_rowid={}",
+            name,
+            result.last_insert_rowid()
+        );
     }
 
     // Example 2: Query all users with PreparedQueryAs
     println!("\n--- Example 2: Fetching all users ---");
     let mut query_all = PreparedQueryAs::<User, _>::new(
         "SELECT id, name, email FROM users ORDER BY id",
-        |q, _key| q,  // No parameters needed
+        |q, _key| q, // No parameters needed
     )?;
 
     let users = query_all.fetch_all(&pool).await?;
@@ -83,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         |q, key| match key {
             ":email" => q.bind(search_email),
             _ => q,
-        }
+        },
     )?;
 
     match query_one.fetch_optional(&pool).await? {
@@ -102,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ":name" => q.bind(new_name),
             ":email" => q.bind(update_email),
             _ => q,
-        }
+        },
     )?;
 
     let result = update_query.execute(&pool).await?;
@@ -114,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         |q, key| match key {
             ":email" => q.bind(update_email),
             _ => q,
-        }
+        },
     )?;
 
     if let Some(user) = verify_query.fetch_optional(&pool).await? {
@@ -130,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         |q, key| match key {
             ":email" => q.bind(delete_email),
             _ => q,
-        }
+        },
     )?;
 
     let result = delete_query.execute(&pool).await?;
@@ -151,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Cleanup
     println!("\nCleaning up...");
-    sqlx::query("DROP TABLE IF EXISTS users")
+    sqlx::query(AssertSqlSafe("DROP TABLE IF EXISTS users"))
         .execute(&pool)
         .await?;
 

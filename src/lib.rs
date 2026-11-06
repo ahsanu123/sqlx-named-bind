@@ -7,7 +7,7 @@
 //!
 //! - **Named Placeholders**: Use `:param_name` instead of `?` in your SQL queries
 //! - **HRTB Pattern**: Avoids self-referential lifetime issues through proper use of Higher-Rank Trait Bounds
-//! - **Generic Executor Support**: Works with `MySqlPool`, `Transaction`, and any SQLx `Executor`
+//! - **Generic Executor Support**: Works with `SqlitePool`, `Transaction`, and any SQLx `Executor`
 //! - **Type-Safe Results**: `PreparedQueryAs` provides strongly-typed query results via `FromRow`
 //! - **Zero Runtime Overhead**: Placeholder conversion happens at query construction time
 //!
@@ -17,7 +17,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! sqlx = { version = "0.8", features = ["mysql", "runtime-tokio"] }
+//! sqlx = { version = "0.9", features = ["sqlite", "runtime-tokio"] }
 //! sqlx-named-bind = "0.1"
 //! ```
 //!
@@ -26,11 +26,11 @@
 //! ### Basic Query Execution
 //!
 //! ```rust,no_run
-//! use sqlx::MySqlPool;
+//! use sqlx::SqlitePool;
 //! use sqlx_named_bind::PreparedQuery;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let pool = MySqlPool::connect("mysql://localhost/test").await?;
+//! let pool = SqlitePool::connect("sqlite::memory:").await?;
 //!
 //! let user_id = 42;
 //! let name = "John Doe";
@@ -53,7 +53,7 @@
 //! ### Typed Query Results
 //!
 //! ```rust,no_run
-//! use sqlx::{MySqlPool, FromRow};
+//! use sqlx::{SqlitePool, FromRow};
 //! use sqlx_named_bind::PreparedQueryAs;
 //!
 //! #[derive(FromRow)]
@@ -64,10 +64,10 @@
 //! }
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! # let pool = MySqlPool::connect("mysql://localhost/test").await?;
+//! # let pool = SqlitePool::connect("sqlite::memory:").await?;
 //! let min_age = 18;
 //!
-//! let mut query = PreparedQueryAs::<User, _>::new(
+//! let mut query = PreparedQueryAs::<User, _, sqlx::Sqlite, _, _>::new(
 //!     "SELECT id, name, email FROM users WHERE age >= :min_age",
 //!     |q, key| match key {
 //!         ":min_age" => q.bind(min_age),
@@ -86,12 +86,12 @@
 //! ### Using with Transactions
 //!
 //! ```rust,no_run
-//! use sqlx::{MySqlPool, Transaction, MySql};
+//! use sqlx::{SqlitePool, Transaction, Sqlite};
 //! use sqlx_named_bind::PreparedQuery;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! # let pool = MySqlPool::connect("mysql://localhost/test").await?;
-//! let mut tx: Transaction<MySql> = pool.begin().await?;
+//! # let pool = SqlitePool::connect("sqlite::memory:").await?;
+//! let mut tx: Transaction<Sqlite> = pool.begin().await?;
 //!
 //! let mut query1 = PreparedQuery::new(
 //!     "UPDATE accounts SET balance = balance - :amount WHERE id = :from_id",
@@ -122,7 +122,7 @@
 //! ### Optional Results
 //!
 //! ```rust,no_run
-//! use sqlx::{MySqlPool, FromRow};
+//! use sqlx::{SqlitePool, FromRow};
 //! use sqlx_named_bind::PreparedQueryAs;
 //!
 //! #[derive(FromRow)]
@@ -132,10 +132,10 @@
 //! }
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! # let pool = MySqlPool::connect("mysql://localhost/test").await?;
+//! # let pool = SqlitePool::connect("sqlite::memory:").await?;
 //! let email = "user@example.com";
 //!
-//! let mut query = PreparedQueryAs::<User, _>::new(
+//! let mut query = PreparedQueryAs::<User, _, sqlx::Sqlite, _, _>::new(
 //!     "SELECT id, name FROM users WHERE email = :email",
 //!     |q, key| match key {
 //!         ":email" => q.bind(email),
@@ -164,7 +164,7 @@
 //!
 //! ## Limitations
 //!
-//! - Currently only supports MySQL (PostgreSQL and SQLite support planned)
+//! - The builder emits `?` placeholders; PostgreSQL numbered placeholders are not implemented
 //! - Placeholder names must match `[a-zA-Z0-9_]+`
 //! - All placeholders in the SQL must be handled by the binder function
 //!
@@ -181,9 +181,72 @@ pub use error::{Error, Result};
 pub use query::PreparedQuery;
 pub use query_as::PreparedQueryAs;
 
+/// A prepared query using SQLite arguments.
+#[cfg(feature = "sqlite")]
+pub type SqlitePreparedQuery<F> = PreparedQuery<F, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>;
+
+/// A typed prepared query using SQLite arguments and rows.
+#[cfg(feature = "sqlite")]
+pub type SqlitePreparedQueryAs<'q, R, F> =
+    PreparedQueryAs<'q, R, F, sqlx::Sqlite, sqlx::sqlite::SqliteArguments, sqlx::sqlite::SqliteRow>;
+
+/// A prepared query using MySQL arguments.
+#[cfg(feature = "mysql")]
+pub type MySqlPreparedQuery<F> = PreparedQuery<F, sqlx::MySql, sqlx::mysql::MySqlArguments>;
+
+/// A typed prepared query using MySQL arguments and rows.
+#[cfg(feature = "mysql")]
+pub type MySqlPreparedQueryAs<'q, R, F> =
+    PreparedQueryAs<'q, R, F, sqlx::MySql, sqlx::mysql::MySqlArguments, sqlx::mysql::MySqlRow>;
+
+/// A prepared query using PostgreSQL arguments.
+#[cfg(feature = "postgres")]
+pub type PgPreparedQuery<F> = PreparedQuery<F, sqlx::Postgres, sqlx::postgres::PgArguments>;
+
+/// A typed prepared query using PostgreSQL arguments and rows.
+#[cfg(feature = "postgres")]
+pub type PgPreparedQueryAs<'q, R, F> =
+    PreparedQueryAs<'q, R, F, sqlx::Postgres, sqlx::postgres::PgArguments, sqlx::postgres::PgRow>;
+
+/// A prepared query using SQLx's runtime-selected backend.
+#[cfg(feature = "any")]
+pub type AnyPreparedQuery<F> = PreparedQuery<F, sqlx::Any, sqlx::any::AnyArguments>;
+
+/// A typed prepared query using SQLx's runtime-selected backend.
+#[cfg(feature = "any")]
+pub type AnyPreparedQueryAs<'q, R, F> =
+    PreparedQueryAs<'q, R, F, sqlx::Any, sqlx::any::AnyArguments, sqlx::any::AnyRow>;
+
+/// A prepared query using the optional `sqlx-mssql-rs` driver.
+#[cfg(feature = "mssql")]
+pub type MssqlPreparedQuery<F> =
+    PreparedQuery<F, sqlx_mssql_rs::Mssql, sqlx_mssql_rs::MssqlArguments>;
+
+/// A typed prepared query using the optional `sqlx-mssql-rs` driver.
+#[cfg(feature = "mssql")]
+pub type MssqlPreparedQueryAs<'q, R, F> = PreparedQueryAs<
+    'q,
+    R,
+    F,
+    sqlx_mssql_rs::Mssql,
+    sqlx_mssql_rs::MssqlArguments,
+    sqlx_mssql_rs::MssqlRow,
+>;
+
 /// Convenience re-exports for common use cases
 pub mod prelude {
     pub use crate::error::{Error, Result};
     pub use crate::PreparedQuery;
     pub use crate::PreparedQueryAs;
+
+    #[cfg(feature = "any")]
+    pub use crate::{AnyPreparedQuery, AnyPreparedQueryAs};
+    #[cfg(feature = "mssql")]
+    pub use crate::{MssqlPreparedQuery, MssqlPreparedQueryAs};
+    #[cfg(feature = "mysql")]
+    pub use crate::{MySqlPreparedQuery, MySqlPreparedQueryAs};
+    #[cfg(feature = "postgres")]
+    pub use crate::{PgPreparedQuery, PgPreparedQueryAs};
+    #[cfg(feature = "sqlite")]
+    pub use crate::{SqlitePreparedQuery, SqlitePreparedQueryAs};
 }

@@ -5,7 +5,7 @@ use sqlx::Executor;
 use sqlx::{AssertSqlSafe, Database, IntoArguments};
 use std::marker::PhantomData;
 
-/// Type alias for SQLx Query with MySQL arguments
+/// Type alias for SQLx Query with generic database arguments.
 pub type Q<'q, DB, ARGS> = Query<'q, DB, ARGS>;
 
 /// A prepared query builder that supports named placeholders.
@@ -22,11 +22,11 @@ pub type Q<'q, DB, ARGS> = Query<'q, DB, ARGS>;
 /// # Examples
 ///
 /// ```rust,no_run
-/// use sqlx::MySqlPool;
+/// use sqlx::SqlitePool;
 /// use sqlx_named_bind::PreparedQuery;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let pool = MySqlPool::connect("mysql://localhost/test").await?;
+/// # let pool = SqlitePool::connect("sqlite::memory:").await?;
 /// let user_id = 42;
 /// let name = "John Doe";
 ///
@@ -48,12 +48,12 @@ pub type Q<'q, DB, ARGS> = Query<'q, DB, ARGS>;
 /// # Using with Transactions
 ///
 /// ```rust,no_run
-/// use sqlx::{MySqlPool, Transaction, MySql};
+/// use sqlx::{SqlitePool, Transaction, Sqlite};
 /// use sqlx_named_bind::PreparedQuery;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let pool = MySqlPool::connect("mysql://localhost/test").await?;
-/// let mut tx: Transaction<MySql> = pool.begin().await?;
+/// # let pool = SqlitePool::connect("sqlite::memory:").await?;
+/// let mut tx: Transaction<Sqlite> = pool.begin().await?;
 ///
 /// let mut query = PreparedQuery::new(
 ///     "UPDATE users SET name = :name WHERE user_id = :user_id",
@@ -103,7 +103,7 @@ where
     /// ```rust
     /// use sqlx_named_bind::PreparedQuery;
     ///
-    /// let query = PreparedQuery::new(
+    /// let query = PreparedQuery::<_, sqlx::Sqlite, _>::new(
     ///     "SELECT * FROM users WHERE id = :id",
     ///     |q, key| match key {
     ///         ":id" => q.bind(42),
@@ -135,7 +135,7 @@ where
     ///
     /// This method constructs a fresh `Query` on each call, avoiding self-referential
     /// lifetime issues. It works with any SQLx `Executor` implementation, including
-    /// `MySqlPool`, `Transaction`, and others.
+    /// `SqlitePool`, `Transaction`, and others.
     ///
     /// # Arguments
     ///
@@ -143,7 +143,7 @@ where
     ///
     /// # Returns
     ///
-    /// Returns the MySQL query result containing information about affected rows,
+    /// Returns the backend's query result containing information about affected rows,
     /// last insert ID, etc.
     ///
     /// # Errors
@@ -153,11 +153,11 @@ where
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use sqlx::MySqlPool;
+    /// use sqlx::SqlitePool;
     /// use sqlx_named_bind::PreparedQuery;
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let pool = MySqlPool::connect("mysql://localhost/test").await?;
+    /// # let pool = SqlitePool::connect("sqlite::memory:").await?;
     /// let mut query = PreparedQuery::new(
     ///     "DELETE FROM users WHERE id = :id",
     ///     |q, key| match key {
@@ -187,38 +187,120 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
+    use crate::SqlitePreparedQuery;
+    use sqlx::{Connection, SqliteConnection};
 
-    // #[test]
-    // fn test_prepared_query_new() {
-    //     let result = PreparedQuery::new("SELECT * FROM users WHERE id = :id", |q, _| q);
-    //     assert!(result.is_ok());
-    // }
-    //
-    // #[test]
-    // fn test_prepared_query_placeholder_order() {
-    //     let query = PreparedQuery::new(
-    //         "SELECT * FROM users WHERE id = :id AND name = :name",
-    //         |q, _| q,
-    //     )
-    //     .unwrap();
-    //
-    //     assert_eq!(query.order, vec![":id", ":name"]);
-    //     assert_eq!(query.sql, "SELECT * FROM users WHERE id = ? AND name = ?");
-    // }
-    //
-    // #[test]
-    // fn test_prepared_query_repeated_placeholders() {
-    //     let query = PreparedQuery::new(
-    //         "SELECT * FROM users WHERE id = :id OR user_id = :id",
-    //         |q, _| q,
-    //     )
-    //     .unwrap();
-    //
-    //     // Both occurrences should be captured
-    //     assert_eq!(query.order, vec![":id", ":id"]);
-    //     assert_eq!(query.sql, "SELECT * FROM users WHERE id = ? OR user_id = ?");
-    // }
+    #[test]
+    fn test_prepared_query_placeholder_order() {
+        let query = SqlitePreparedQuery::new(
+            "SELECT * FROM users WHERE id = :id AND name = :name OR user_id = :id",
+            |q, _| q,
+        )
+        .unwrap();
+
+        assert_eq!(query.order, vec![":id", ":name", ":id"]);
+        assert_eq!(
+            query.sql,
+            "SELECT * FROM users WHERE id = ? AND name = ? OR user_id = ?"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_repeated_placeholders_and_reuse() -> crate::Result<()> {
+        let mut connection = SqliteConnection::connect("sqlite::memory:").await?;
+        sqlx::query(AssertSqlSafe(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, alias TEXT NOT NULL)",
+        ))
+        .execute(&mut connection)
+        .await?;
+
+        let mut id = 0;
+        let mut query = SqlitePreparedQuery::new(
+            "INSERT INTO users (id, name, alias) VALUES (:id, :name, :name)",
+            |q, key| match key {
+                ":id" => {
+                    id += 1;
+                    q.bind(id)
+                }
+                ":name" => q.bind("Alice"),
+                _ => panic!("unexpected placeholder: {key}"),
+            },
+        )?;
+
+        assert_eq!(query.execute(&mut connection).await?.rows_affected(), 1);
+        assert_eq!(query.execute(&mut connection).await?.rows_affected(), 1);
+
+        let rows: Vec<(i32, String, String)> = sqlx::query_as(AssertSqlSafe(
+            "SELECT id, name, alias FROM users ORDER BY id",
+        ))
+        .fetch_all(&mut connection)
+        .await?;
+        assert_eq!(
+            rows,
+            vec![
+                (1, "Alice".to_owned(), "Alice".to_owned()),
+                (2, "Alice".to_owned(), "Alice".to_owned()),
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_transaction_commit_and_rollback() -> crate::Result<()> {
+        let mut connection = SqliteConnection::connect("sqlite::memory:").await?;
+        sqlx::query(AssertSqlSafe(
+            "CREATE TABLE values_to_insert (value INTEGER)",
+        ))
+        .execute(&mut connection)
+        .await?;
+
+        let mut query = SqlitePreparedQuery::new(
+            "INSERT INTO values_to_insert (value) VALUES (:value)",
+            |q, key| match key {
+                ":value" => q.bind(42),
+                _ => panic!("unexpected placeholder: {key}"),
+            },
+        )?;
+
+        let mut tx = connection.begin().await?;
+        query.execute(&mut *tx).await?;
+        tx.rollback().await?;
+
+        let count: (i64,) = sqlx::query_as(AssertSqlSafe("SELECT COUNT(*) FROM values_to_insert"))
+            .fetch_one(&mut connection)
+            .await?;
+        assert_eq!(count.0, 0);
+
+        let mut tx = connection.begin().await?;
+        query.execute(&mut *tx).await?;
+        tx.commit().await?;
+
+        let values: Vec<(i32,)> =
+            sqlx::query_as(AssertSqlSafe("SELECT value FROM values_to_insert"))
+                .fetch_all(&mut connection)
+                .await?;
+        assert_eq!(values, vec![(42,)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_propagates_database_error() -> crate::Result<()> {
+        let mut connection = SqliteConnection::connect("sqlite::memory:").await?;
+        let mut query =
+            SqlitePreparedQuery::new("INSERT INTO missing_table (id) VALUES (:id)", |q, key| {
+                match key {
+                    ":id" => q.bind(1),
+                    _ => panic!("unexpected placeholder: {key}"),
+                }
+            })?;
+
+        assert!(matches!(
+            query.execute(&mut connection).await,
+            Err(crate::Error::Database(_))
+        ));
+        Ok(())
+    }
 }

@@ -11,7 +11,7 @@ A SQLx extension that provides named parameter binding with HRTB (Higher-Rank Tr
 - ✨ **Named Placeholders**: Use `:param_name` instead of `?` in your SQL queries
 - 🔒 **Type-Safe**: Full compile-time type checking with SQLx
 - 🚀 **Zero Overhead**: Placeholder conversion happens at construction time
-- 🔄 **Generic Executor**: Works with `MySqlPool`, `Transaction`, and any SQLx `Executor`
+- 🔄 **Generic Executor**: `Transaction`, and any SQLx `Executor`
 - 📦 **Strongly-Typed Results**: `PreparedQueryAs` provides type-safe query results via `FromRow`
 - 🛡️ **Lifetime Safe**: HRTB pattern avoids self-referential lifetime issues
 
@@ -21,24 +21,61 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-sqlx = { version = "0.8", features = ["mysql", "runtime-tokio"] }
+sqlx = { version = "0.9", default-features = false, features = ["sqlite", "runtime-tokio", "macros"] }
 sqlx-named-bind = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+SQLite is enabled by default. Each platform feature exposes database-specific type
+aliases in the crate root and `prelude`, without changing the generic implementation.
+
+| Feature | Query alias | Typed query alias |
+|---------|-------------|-------------------|
+| `sqlite` (default) | `SqlitePreparedQuery<F>` | `SqlitePreparedQueryAs<'q, R, F>` |
+| `mysql` | `MySqlPreparedQuery<F>` | `MySqlPreparedQueryAs<'q, R, F>` |
+| `postgres` | `PgPreparedQuery<F>` | `PgPreparedQueryAs<'q, R, F>` |
+| `any` | `AnyPreparedQuery<F>` | `AnyPreparedQueryAs<'q, R, F>` |
+| `mssql` | `MssqlPreparedQuery<F>` | `MssqlPreparedQueryAs<'q, R, F>` |
+
+For example, select MySQL instead of the default SQLite backend:
+
+```toml
+[dependencies]
+sqlx = { version = "0.9", default-features = false, features = ["mysql", "runtime-tokio"] }
+sqlx-named-bind = { version = "0.1", default-features = false, features = ["mysql"] }
+```
+
+Enable `mssql` to use the optional
+[`sqlx-mssql-rs`](https://crates.io/crates/sqlx-mssql-rs) driver:
+
+```toml
+[dependencies]
+sqlx-named-bind = { version = "0.1", default-features = false, features = ["mssql"] }
+sqlx-mssql-rs = { version = "0.1.1", default-features = false }
 ```
 
 ## Quick Start
 
 ```rust
-use sqlx::MySqlPool;
-use sqlx_named_bind::PreparedQuery;
+use sqlx::{sqlite::SqlitePoolOptions, AssertSqlSafe};
+use sqlx_named_bind::SqlitePreparedQuery;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = MySqlPool::connect("mysql://localhost/test").await?;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
+    sqlx::query(AssertSqlSafe(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+    ))
+    .execute(&pool)
+    .await?;
 
     let user_id = 42;
     let name = "John Doe";
 
-    let mut query = PreparedQuery::new(
+    let mut query = SqlitePreparedQuery::new(
         "INSERT INTO users (id, name) VALUES (:id, :name)",
         |q, key| match key {
             ":id" => q.bind(user_id),
@@ -59,8 +96,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Typed Query Results
 
 ```rust
-use sqlx::{MySqlPool, FromRow};
-use sqlx_named_bind::PreparedQueryAs;
+use sqlx::{SqlitePool, FromRow};
+use sqlx_named_bind::SqlitePreparedQueryAs;
 
 #[derive(FromRow)]
 struct User {
@@ -69,8 +106,8 @@ struct User {
     email: String,
 }
 
-async fn find_users(pool: &MySqlPool, min_age: i32) -> Result<Vec<User>, Box<dyn std::error::Error>> {
-    let mut query = PreparedQueryAs::<User, _>::new(
+async fn find_users(pool: &SqlitePool, min_age: i32) -> Result<Vec<User>, Box<dyn std::error::Error>> {
+    let mut query = SqlitePreparedQueryAs::<User, _>::new(
         "SELECT id, name, email FROM users WHERE age >= :min_age",
         |q, key| match key {
             ":min_age" => q.bind(min_age),
@@ -85,18 +122,18 @@ async fn find_users(pool: &MySqlPool, min_age: i32) -> Result<Vec<User>, Box<dyn
 ### Using with Transactions
 
 ```rust
-use sqlx::{MySqlPool, Transaction, MySql};
-use sqlx_named_bind::PreparedQuery;
+use sqlx::{SqlitePool, Transaction, Sqlite};
+use sqlx_named_bind::SqlitePreparedQuery;
 
 async fn transfer_money(
-    pool: &MySqlPool,
+    pool: &SqlitePool,
     from_id: i32,
     to_id: i32,
     amount: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut tx: Transaction<MySql> = pool.begin().await?;
+    let mut tx: Transaction<Sqlite> = pool.begin().await?;
 
-    let mut debit = PreparedQuery::new(
+    let mut debit = SqlitePreparedQuery::new(
         "UPDATE accounts SET balance = balance - :amount WHERE id = :id",
         |q, key| match key {
             ":amount" => q.bind(amount),
@@ -105,7 +142,7 @@ async fn transfer_money(
         }
     )?;
 
-    let mut credit = PreparedQuery::new(
+    let mut credit = SqlitePreparedQuery::new(
         "UPDATE accounts SET balance = balance + :amount WHERE id = :id",
         |q, key| match key {
             ":amount" => q.bind(amount),
@@ -125,8 +162,8 @@ async fn transfer_money(
 ### Optional Results
 
 ```rust
-use sqlx::{MySqlPool, FromRow};
-use sqlx_named_bind::PreparedQueryAs;
+use sqlx::{SqlitePool, FromRow};
+use sqlx_named_bind::SqlitePreparedQueryAs;
 
 #[derive(FromRow)]
 struct User {
@@ -135,10 +172,10 @@ struct User {
 }
 
 async fn find_user_by_email(
-    pool: &MySqlPool,
+    pool: &SqlitePool,
     email: &str,
 ) -> Result<Option<User>, Box<dyn std::error::Error>> {
-    let mut query = PreparedQueryAs::<User, _>::new(
+    let mut query = SqlitePreparedQueryAs::<User, _>::new(
         "SELECT id, name FROM users WHERE email = :email",
         |q, key| match key {
             ":email" => q.bind(email),
@@ -167,7 +204,7 @@ Without HRTB, you'd encounter self-referential lifetime issues:
 ```rust
 // ❌ This doesn't work - self-referential lifetime
 struct BadQuery<'a> {
-    query: Query<'a, MySql>,  // 'a refers to data inside BadQuery
+    query: Query<'a, Sqlite>,  // 'a refers to data inside BadQuery
 }
 ```
 
@@ -175,32 +212,61 @@ With HRTB, we defer the lifetime decision to call-site:
 
 ```rust
 // ✅ This works - lifetime chosen at each call
-where F: for<'q> FnMut(Query<'q, MySql>, &str) -> Query<'q, MySql>
+where F: for<'q> FnMut(Query<'q, Sqlite>, &str) -> Query<'q, Sqlite>
 ```
 
 ## API Documentation
 
-### `PreparedQuery`
+### Generic types and platform aliases
+
+The original generic types remain available:
+
+```rust
+use sqlx_named_bind::{PreparedQuery, PreparedQueryAs};
+
+// Specify the backend; SQLx argument and row types can be inferred.
+let query = PreparedQuery::<_, sqlx::Sqlite, _>::new(
+    "DELETE FROM users WHERE id = :id",
+    |q, key| match key {
+        ":id" => q.bind(42),
+        _ => q,
+    },
+)?;
+
+let typed = PreparedQueryAs::<(i32,), _, sqlx::Sqlite, _, _>::new(
+    "SELECT :id",
+    |q, key| match key {
+        ":id" => q.bind(42),
+        _ => q,
+    },
+)?;
+```
+
+`PreparedQuery<F, DB, ARG>` and `PreparedQueryAs<'q, R, F, DB, ARG, ROW>` expose all
+generic parameters. Platform aliases fix `DB`, `ARG`, and `ROW`, leaving only the
+binder type `F` (usually `_`) and result type `R` for typed queries.
+
+### `SqlitePreparedQuery<F>`
 
 For queries that execute but don't return rows (`INSERT`, `UPDATE`, `DELETE`).
 
 **Methods:**
 - `new(template, binder)` - Create a new prepared query
-- `execute(executor)` - Execute the query and return `MySqlQueryResult`
+- `execute(executor)` - Execute the query and return `SqliteQueryResult`
 
-### `PreparedQueryAs<R>`
+### `SqlitePreparedQueryAs<'q, R, F>`
 
 For queries that return typed rows (`SELECT`).
 
 **Methods:**
 - `new(template, binder)` - Create a new prepared query
 - `fetch_all(executor)` - Fetch all matching rows
-- `fetch_one(executor)` - Fetch exactly one row (error if 0 or >1)
-- `fetch_optional(executor)` - Fetch at most one row (returns `Option<R>`)
+- `fetch_one(executor)` - Fetch the first row (error if no rows match)
+- `fetch_optional(executor)` - Fetch the first row if present (returns `Option<R>`)
 
 ## Limitations
 
-- Currently only supports MySQL (PostgreSQL and SQLite support planned)
+- The builder emits `?` placeholders; PostgreSQL numbered placeholders are not implemented
 - Placeholder names must match `[a-zA-Z0-9_]+`
 - All placeholders in the SQL must be handled by the binder function
 

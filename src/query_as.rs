@@ -4,7 +4,7 @@ use crate::builder::build_query;
 use regex::Regex;
 use sqlx::{query::QueryAs, AssertSqlSafe, Database, Executor, IntoArguments};
 
-/// Type alias for SQLx QueryAs with MySQL arguments
+/// Type alias for SQLx QueryAs with generic database arguments.
 pub type QA<'q, R, DB, ARG> = QueryAs<'q, DB, R, ARG>;
 
 /// A prepared query builder that returns typed results from named placeholders.
@@ -20,7 +20,7 @@ pub type QA<'q, R, DB, ARG> = QueryAs<'q, DB, R, ARG>;
 /// # Examples
 ///
 /// ```rust,no_run
-/// use sqlx::{MySqlPool, FromRow};
+/// use sqlx::{SqlitePool, FromRow};
 /// use sqlx_named_bind::PreparedQueryAs;
 ///
 /// #[derive(FromRow)]
@@ -30,10 +30,10 @@ pub type QA<'q, R, DB, ARG> = QueryAs<'q, DB, R, ARG>;
 /// }
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let pool = MySqlPool::connect("mysql://localhost/test").await?;
+/// # let pool = SqlitePool::connect("sqlite::memory:").await?;
 /// let user_id = 42;
 ///
-/// let mut query = PreparedQueryAs::<User, _>::new(
+/// let mut query = PreparedQueryAs::<User, _, sqlx::Sqlite, _, _>::new(
 ///     "SELECT id, name FROM users WHERE id = :id",
 ///     |q, key| match key {
 ///         ":id" => q.bind(user_id),
@@ -104,7 +104,7 @@ where
     ///     name: String,
     /// }
     ///
-    /// let query = PreparedQueryAs::<User, _>::new(
+    /// let query = PreparedQueryAs::<User, _, sqlx::Sqlite, _, _>::new(
     ///     "SELECT id, name FROM users WHERE id = :id",
     ///     |q, key| match key {
     ///         ":id" => q.bind(42),
@@ -154,7 +154,7 @@ where
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use sqlx::{MySqlPool, FromRow};
+    /// use sqlx::{SqlitePool, FromRow};
     /// use sqlx_named_bind::PreparedQueryAs;
     ///
     /// #[derive(FromRow)]
@@ -164,8 +164,8 @@ where
     /// }
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let pool = MySqlPool::connect("mysql://localhost/test").await?;
-    /// let mut query = PreparedQueryAs::<User, _>::new(
+    /// # let pool = SqlitePool::connect("sqlite::memory:").await?;
+    /// let mut query = PreparedQueryAs::<User, _, sqlx::Sqlite, _, _>::new(
     ///     "SELECT id, name FROM users WHERE age > :min_age",
     ///     |q, key| match key {
     ///         ":min_age" => q.bind(18),
@@ -217,7 +217,7 @@ where
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use sqlx::{MySqlPool, FromRow};
+    /// use sqlx::{SqlitePool, FromRow};
     /// use sqlx_named_bind::PreparedQueryAs;
     ///
     /// #[derive(FromRow)]
@@ -227,8 +227,8 @@ where
     /// }
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let pool = MySqlPool::connect("mysql://localhost/test").await?;
-    /// let mut query = PreparedQueryAs::<User, _>::new(
+    /// # let pool = SqlitePool::connect("sqlite::memory:").await?;
+    /// let mut query = PreparedQueryAs::<User, _, sqlx::Sqlite, _, _>::new(
     ///     "SELECT id, name FROM users WHERE id = :id",
     ///     |q, key| match key {
     ///         ":id" => q.bind(42),
@@ -279,7 +279,7 @@ where
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use sqlx::{MySqlPool, FromRow};
+    /// use sqlx::{SqlitePool, FromRow};
     /// use sqlx_named_bind::PreparedQueryAs;
     ///
     /// #[derive(FromRow)]
@@ -289,8 +289,8 @@ where
     /// }
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let pool = MySqlPool::connect("mysql://localhost/test").await?;
-    /// let mut query = PreparedQueryAs::<User, _>::new(
+    /// # let pool = SqlitePool::connect("sqlite::memory:").await?;
+    /// let mut query = PreparedQueryAs::<User, _, sqlx::Sqlite, _, _>::new(
     ///     "SELECT id, name FROM users WHERE email = :email",
     ///     |q, key| match key {
     ///         ":email" => q.bind("user@example.com"),
@@ -324,41 +324,91 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
-    use super::*;
+    use crate::SqlitePreparedQueryAs;
+    use sqlx::{Connection, SqliteConnection};
 
-    // Mock struct for testing (requires sqlx::FromRow)
-    // In real tests, this would use a real database connection
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct TestRow {
+        id: i32,
+        name: String,
+    }
 
-    // #[test]
-    // fn test_prepared_query_as_new() {
-    //     #[derive(sqlx::FromRow)]
-    //     struct TestRow {
-    //         #[allow(dead_code)]
-    //         id: i32,
-    //     }
-    //
-    //     let result =
-    //         PreparedQueryAs::<TestRow, _>::new("SELECT id FROM users WHERE id = :id", |q, _| q);
-    //     assert!(result.is_ok());
-    // }
-    //
-    // #[test]
-    // fn test_prepared_query_as_placeholder_order() {
-    //     #[derive(sqlx::FromRow)]
-    //     struct TestRow {
-    //         #[allow(dead_code)]
-    //         id: i32,
-    //     }
-    //
-    //     let query = PreparedQueryAs::<TestRow, _>::new(
-    //         "SELECT id FROM users WHERE id = :id AND name = :name",
-    //         |q, _| q,
-    //     )
-    //     .unwrap();
-    //
-    //     assert_eq!(query.order, vec![":id", ":name"]);
-    //     assert_eq!(query.sql, "SELECT id FROM users WHERE id = ? AND name = ?");
-    // }
+    #[test]
+    fn test_prepared_query_as_placeholder_order() {
+        let query = SqlitePreparedQueryAs::<TestRow, _>::new(
+            "SELECT id, name FROM users WHERE id = :id AND name = :name OR id = :id",
+            |q, _| q,
+        )
+        .unwrap();
+
+        assert_eq!(query.order, vec![":id", ":name", ":id"]);
+        assert_eq!(
+            query.sql,
+            "SELECT id, name FROM users WHERE id = ? AND name = ? OR id = ?"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_methods_and_query_reuse() -> crate::Result<()> {
+        let mut connection = SqliteConnection::connect("sqlite::memory:").await?;
+        let mut query = SqlitePreparedQueryAs::<TestRow, _>::new(
+            "SELECT :id AS id, :name AS name",
+            |q, key| match key {
+                ":id" => q.bind(42),
+                ":name" => q.bind("Alice"),
+                _ => panic!("unexpected placeholder: {key}"),
+            },
+        )?;
+        let expected = TestRow {
+            id: 42,
+            name: "Alice".to_owned(),
+        };
+
+        assert_eq!(
+            query.fetch_all(&mut connection).await?,
+            vec![TestRow {
+                id: 42,
+                name: "Alice".to_owned(),
+            }]
+        );
+        assert_eq!(query.fetch_one(&mut connection).await?, expected);
+        assert_eq!(query.fetch_optional(&mut connection).await?, Some(expected));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_fetch_missing_rows() -> crate::Result<()> {
+        let mut connection = SqliteConnection::connect("sqlite::memory:").await?;
+        let mut query = SqlitePreparedQueryAs::<TestRow, _>::new(
+            "SELECT 1 AS id, 'Alice' AS name WHERE 1 = 0",
+            |q, _| q,
+        )?;
+
+        assert!(query.fetch_all(&mut connection).await?.is_empty());
+        assert_eq!(query.fetch_optional(&mut connection).await?, None);
+        assert!(matches!(
+            query.fetch_one(&mut connection).await,
+            Err(crate::Error::Database(sqlx::Error::RowNotFound))
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_fetch_all_repeated_placeholders_in_transaction() -> crate::Result<()> {
+        let mut connection = SqliteConnection::connect("sqlite::memory:").await?;
+        let mut tx = connection.begin().await?;
+        let mut query = SqlitePreparedQueryAs::<(i32,), _>::new(
+            "SELECT :id UNION ALL SELECT :id",
+            |q, key| match key {
+                ":id" => q.bind(42),
+                _ => panic!("unexpected placeholder: {key}"),
+            },
+        )?;
+
+        assert_eq!(query.fetch_all(&mut *tx).await?, vec![(42,), (42,)]);
+        tx.commit().await?;
+        Ok(())
+    }
 }
